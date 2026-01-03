@@ -50,7 +50,7 @@ server {
     ssl_session_cache shared:SSL:10m;
     ssl_session_tickets off;
     ssl_protocols TLSv1.3;
-    ssl_ciphers 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
+    ssl_ciphers 'ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384';
     ssl_prefer_server_ciphers on;
     ssl_stapling on;
     ssl_stapling_verify on;
