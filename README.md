@@ -30,6 +30,7 @@ docker run -d \
     id -u appuser >/dev/null 2>&1 || useradd -u 1000 -m appuser && \
     exec su appuser -c 'python /usr/src/myapp/upload-srv.py'"
 ```
+在`服务端`目录内，还有生成视频与给图片打时间水印的程序：`生成延时摄影.py` `生成延时摄影.py`
 
 ### 用nginx反向代理接收端
 ```nginx‘s default.conf
