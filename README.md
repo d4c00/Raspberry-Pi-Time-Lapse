@@ -3,7 +3,7 @@
 如果断网会临时存储在本地，并在网络恢复后会自动安全上传。<br>
 树莓派除了最新型号，大部分都不带rtc模块，在上电时如果没网，无法进行ntp，照片命名时间会变成1970年，可以考虑购买rtc模块或者开机时连一下wifi，待ntp完成后再断网。<br>
 <br>
-我测试的的设备型号是 `Raspberry Pi Zero 2 W` 与第三方 `IMX708` 模块 (仿制Buy a Raspberry Pi Camera Module 3 Wide)
+我测试的的设备型号是 `Raspberry Pi Zero 2 W` 与第三方 `IMX708` 模块 (仿制官方Raspberry Pi Camera Module 3 Wide)
 
 ## 用法：
 ### 在树莓派上运行的程序：
