@@ -13,47 +13,63 @@ import os
 # --- 用户配置 ---
 # ==========================================
 
-DEVICE_ID = "01"                             #设备id
-DEVICE_TOKEN = "cxv-$...21cvn"               #设备认证用TOKEN
-SERVER_SCHEME = "https"
-SERVER_DOMAIN = "your.domain"
-SERVER_PORT = 443
+# 设备标识与鉴权
+DEVICE_ID = "01"               # 设备唯一编号，用于服务端区分照片来源
+DEVICE_TOKEN = "xv-$...21cvn"  # 访问令牌，用于上传时的身份校验，确保安全性
 
-CAPTURE_INTERVAL = 5.0
-JPEG_QUALITY = 95
-RESOLUTION_MODE = "MAX"
+# 服务端连接配置
+SERVER_SCHEME = "https"        # 通讯协议 (http 或 https)
+SERVER_DOMAIN = "your.domain" # 服务器域名或IP地址
+SERVER_PORT = 443             # 服务器端口号
 
-UPLOAD_RETRIES = 3
-DEGRADED_UPLOAD_RETRIES = 1
+# 拍摄基本设置
+CAPTURE_INTERVAL = 5.0         # 拍摄间隔（秒），即每隔多少秒拍一张
+JPEG_QUALITY = 95              # 图片压缩质量 (1-100)，越高越清晰但文件越大
+RESOLUTION_MODE = "MAX"        # 分辨率模式 (对应脚本中的分辨率映射表，如 MAX, FHD 等)
 
-TARGET_BRIGHTNESS = 96
-BRIGHTNESS_DEADBAND = 24
-STEP_SPEED_UP = 0.9
-STEP_SPEED_DOWN = 0.3
-BRIGHTNESS_LOW_THRESHOLD = 64
-BRIGHTNESS_HIGH_THRESHOLD = 180
+# 实时上传重试配置（当网络波动时的处理）
+UPLOAD_RETRIES = 2             # 实时上传失败后的重试次数
+UPLOAD_TIMEOUT = 30            # 上传超时时间（秒），超过此时间则认为单次请求失败
+UPLOAD_WORKERS = 4             # 并行上传的线程数，增加此值可加速排队中的照片上传
 
-MIN_EXPOSURE = 0.25
-MAX_EXPOSURE = 112.0
-MANUAL_ISO = 1600
-AUTOFOCUS_EVERY_N_PHOTOS = 16
-MANUAL_WAIT_MULTIPLIER = 1.0
+# 补传逻辑独立配置（当从断网恢复或处理磁盘残留照片时）
+FLUSH_RETRIES_PER_FILE = 3     # 补传阶段每个文件失败后的重试次数
+RETRY_DELAY = 2                # 失败后的等待延迟（秒），防止连续快速失败重试
 
-MAX_CACHED_PHOTOS = 100
-UPLOAD_TIMEOUT = 30
-UPLOAD_WORKERS = 6
-RETRY_DELAY = 1
+# 亮度与曝光控制（自动切换黑夜模式逻辑）
+TARGET_BRIGHTNESS = 64         # 目标平均亮度值 (0-255)
+BRIGHTNESS_DEADBAND = 24       # 亮度死区，当前亮度在此偏差范围内时不调整曝光，防止反复震荡
+STEP_SPEED_UP = 0.9            # 调亮（增加曝光）的步进速度系数，越大调整越快
+STEP_SPEED_DOWN = 0.3          # 调暗（减少曝光）的步进速度系数，通常设小一点以平滑过渡
+BRIGHTNESS_LOW_THRESHOLD = 48  # 进入手动模式（长曝光模式）的亮度触发下限
+BRIGHTNESS_HIGH_THRESHOLD = 155# 退出手动模式返回自动模式的亮度触发上限
 
-DISK_SUBDIR_NAME = "time-lapse"
-DISK_RESERVE_RATIO = 0.05
-DISK_SORT_BY_MTIME = True
-DISK_FLUSH_ORDER_BY_OLDEST = True
+# 曝光参数限制
+MIN_EXPOSURE = 0.25            # 最小曝光时间（秒）
+MAX_EXPOSURE = 112.0           # 最大曝光时间（秒），用于极暗环境长曝光
+MANUAL_ISO = 1600              # 手动模式下的固定 ISO (增益)
+AUTOFOCUS_EVERY_N_PHOTOS = 16  # 每隔多少张照片执行一次自动对焦循环
+MANUAL_WAIT_MULTIPLIER = 1.0   # 长曝光时的额外等待系数，确保曝光完成后再进行下一张拍摄
 
-ROTATE_ENABLE = True
-ROTATE_ANGLE = 180
+# 内存缓冲区设置
+MAX_CACHED_PHOTOS = 100        # 内存队列中最多缓存的照片张数，满了会丢弃新帧
+
+# 磁盘存储设置
+DISK_SUBDIR_NAME = "time-lapse" # 存盘失败或降级模式下照片存放的本地文件夹名
+DISK_RESERVE_RATIO = 0.05       # 磁盘保留空间比例 (0.05 代表 5%)，低于此比例会删除旧文件
+DISK_SORT_BY_MTIME = True       # 磁盘清理时是否按文件修改时间排序
+DISK_FLUSH_ORDER_BY_OLDEST = True # 补传时是否优先上传最旧的照片
+
+# 图像物理变换
+ROTATE_ENABLE = True           # 是否开启图像旋转
+ROTATE_ANGLE = 180             # 旋转角度 (0, 90, 180, 270)，常用于摄像头倒挂安装
+
+# 启动与网络检测
+STARTUP_NETWORK_WAIT_MAX = 120 # 启动时最长等待网络就绪的时间（秒）
+NETWORK_CHECK_INTERVAL = 5     # 启动时检查网络连通性的循环间隔（秒）
 
 # ==========================================
-# --- 配置结束 ---
+# --- 核心逻辑 ---
 # ==========================================
 
 SERVER_URL = f"{SERVER_SCHEME}://{SERVER_DOMAIN}:{SERVER_PORT}"
@@ -70,10 +86,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DISK_DIR = os.path.join(BASE_DIR, DISK_SUBDIR_NAME)
 os.makedirs(DISK_DIR, exist_ok=True)
 
+# 降级模式标记与锁
 degraded_mode = False
 degraded_lock = threading.Lock()
 
-flush_lock = threading.Lock()  # 磁盘补传互斥锁
+# 补传互斥锁：确保同一时间只有一个补传线程在跑，且不被主流程干扰
+flush_lock = threading.Lock()
 
 def get_log_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -103,7 +121,9 @@ class DiskManager:
     def __init__(self, path, reserve_ratio):
         self.path = path
         self.reserve_ratio = reserve_ratio
-        self.lock = threading.Lock()
+        self.op_lock = threading.Lock() # 磁盘物理操作锁
+        # 内存中记录磁盘是否有文件，减少listdir调用
+        self.has_files = len(os.listdir(self.path)) > 0
 
     def _space_ok(self):
         st = os.statvfs(self.path)
@@ -117,56 +137,77 @@ class DiskManager:
             p = os.path.join(self.path, name)
             try:
                 files.append((os.path.getmtime(p), p))
-            except Exception:
-                pass
+            except Exception: pass
+        
         if DISK_SORT_BY_MTIME:
             files.sort()
+        
         for _, p in files:
-            if self._space_ok():
-                break
+            if self._space_ok(): break
             try:
                 os.remove(p)
-                print(f"[{get_log_time()}] [Disk] 删除旧文件: {os.path.basename(p)}")
-            except Exception:
-                break
+                print(f"[{get_log_time()}] [Disk] 空间不足，删除旧文件: {os.path.basename(p)}")
+            except Exception: break
 
     def save(self, item):
-        with self.lock:
+        with self.op_lock:
             self._cleanup()
             p = os.path.join(self.path, item["name"])
-            with open(p, "wb") as f:
-                f.write(item["data"])
-            print(f"[{get_log_time()}] [Disk] 已保存: {item['name']}")
+            try:
+                with open(p, "wb") as f:
+                    f.write(item["data"])
+                self.has_files = True # 更新状态
+                print(f"[{get_log_time()}] [Disk] 已存盘: {item['name']}")
+            except Exception as e:
+                print(f"[{get_log_time()}] [Disk] 存盘失败: {e}")
 
-    def flush_if_needed(self, uploader, max_attempts=UPLOAD_RETRIES):
+    def flush_to_server(self, session):
+        """
+        核心补传逻辑：一旦启动，要么清空磁盘，要么在连续失败后放弃。
+        """
         if not flush_lock.acquire(blocking=False):
-            return  # 其他线程正在补传，直接返回
+            return # 已经有补传在运行了，跳过
 
         try:
-            names = os.listdir(self.path)
-            if DISK_FLUSH_ORDER_BY_OLDEST:
-                names.sort(key=lambda n: os.path.getmtime(os.path.join(self.path, n)))
+            print(f"[{get_log_time()}] [Flush] 开始执行补传任务...")
+            while True:
+                names = os.listdir(self.path)
+                if not names:
+                    print(f"[{get_log_time()}] [Flush] 磁盘已清空，补传结束。")
+                    self.has_files = False # 更新内存状态：已清空
+                    with degraded_lock:
+                        global degraded_mode
+                        degraded_mode = False
+                    return
 
-            for name in names:
+                if DISK_FLUSH_ORDER_BY_OLDEST:
+                    names.sort(key=lambda n: os.path.getmtime(os.path.join(self.path, n)))
+
+                # 取出第一个文件尝试上传
+                name = names[0]
                 p = os.path.join(self.path, name)
-                for attempt in range(1, max_attempts + 1):
+                success = False
+
+                for attempt in range(1, FLUSH_RETRIES_PER_FILE + 1):
                     try:
                         with open(p, "rb") as f:
                             data = f.read()
-                        if uploader({"name": name, "data": data}):
+                        
+                        if upload_once({"name": name, "data": data}, session):
                             os.remove(p)
-                            print(f"[{get_log_time()}] [Flush] 成功补传: {name}")
+                            print(f"[{get_log_time()}] [Flush] 补传成功: {name}")
+                            success = True
                             break
                         else:
-                            print(f"[{get_log_time()}] [Flush] 重试 {attempt}/{max_attempts} 等待 {RETRY_DELAY}s: {name}")
-                            time.sleep(RETRY_DELAY)
+                            print(f"[{get_log_time()}] [Flush] 补传失败 {attempt}/{FLUSH_RETRIES_PER_FILE}: {name}")
                     except Exception as e:
-                        print(f"[{get_log_time()}] [Flush] 异常 {attempt}/{max_attempts}: {name} | {e}")
-                        time.sleep(RETRY_DELAY)
-                    if attempt == max_attempts:
-                        print(f"[{get_log_time()}] [Flush] 达到最大重试，停止补传: {name}")
-                        return False
-            return True
+                        print(f"[{get_log_time()}] [Flush] 读取/删除异常: {e}")
+                    
+                    time.sleep(RETRY_DELAY)
+
+                if not success:
+                    print(f"[{get_log_time()}] [Flush] 文件 {name} 连续失败，判定网络仍不可用，退出补传。")
+                    return
         finally:
             flush_lock.release()
 
@@ -179,8 +220,6 @@ def upload_once(item, session):
         "X-Filename": item["name"],
         "Content-Type": "image/jpeg"
     }
-
-    print(f"[{get_log_time()}] [HTTP] 正在 POST: {SERVER_URL}/upload | 文件: {item['name']}")
     try:
         r = session.post(
             f"{SERVER_URL}/upload",
@@ -188,78 +227,65 @@ def upload_once(item, session):
             headers=headers,
             timeout=UPLOAD_TIMEOUT
         )
-        if r.status_code == 200:
-            print(f"[{get_log_time()}] [HTTP] 上传成功: {item['name']}")
-            return True
-        else:
-            print(f"[{get_log_time()}] [HTTP] 上传失败: {item['name']} | 状态码: {r.status_code} | 响应: {r.text[:200]}")
-            return False
-    except requests.Timeout:
-        print(f"[{get_log_time()}] [HTTP] 上传超时: {item['name']}")
-        return False
-    except requests.RequestException as e:
-        print(f"[{get_log_time()}] [HTTP] 上传异常: {item['name']} | 异常信息: {e}")
+        return r.status_code == 200
+    except Exception:
         return False
 
 def upload_worker(item):
+    """
+    实时上传工作线程
+    """
     global degraded_mode
     session = requests.Session()
 
+    # 如果当前处于降级模式，直接存盘，不再尝试实时上传，避免卡死线程池
     with degraded_lock:
-        local_degraded = degraded_mode
-
-    # 降级模式上传，只尝试 DEGRADED_UPLOAD_RETRIES 次
-    if local_degraded:
-        for attempt in range(1, DEGRADED_UPLOAD_RETRIES + 1):
-            success = upload_once(item, session)
-            if success:
-                print(f"[{get_log_time()}] [Upload] 降级成功: {item['name']}")
-                disk_manager.flush_if_needed(lambda i: upload_once(i, session), max_attempts=DEGRADED_UPLOAD_RETRIES)
-                with degraded_lock:
-                    degraded_mode = False
-                photo_queue.task_done()
-                return
-            else:
-                print(f"[{get_log_time()}] [Upload] 降级重试 {attempt}/{DEGRADED_UPLOAD_RETRIES} 等待 {RETRY_DELAY}s: {item['name']}")
-                time.sleep(RETRY_DELAY)
-        # 尝试次数用完仍失败，保存到磁盘，保持降级模式
-        disk_manager.save(item)
-        print(f"[{get_log_time()}] [Upload] 降级上传失败，保持降级模式: {item['name']}")
-        photo_queue.task_done()
-        return
-
-    # 非降级模式保持原来的 UPLOAD_RETRIES
-    for attempt in range(1, UPLOAD_RETRIES + 1):
-        success = upload_once(item, session)
-        if success:
-            print(f"[{get_log_time()}] [Upload] 成功 ({attempt}/{UPLOAD_RETRIES}): {item['name']}")
+        if degraded_mode:
+            disk_manager.save(item)
             photo_queue.task_done()
             return
-        else:
-            print(f"[{get_log_time()}] [Upload] 重试 {attempt}/{UPLOAD_RETRIES} 等待 {RETRY_DELAY}s: {item['name']}")
-            time.sleep(RETRY_DELAY)
 
-    with degraded_lock:
-        degraded_mode = True
-    disk_manager.save(item)
-    print(f"[{get_log_time()}] [Upload] 进入降级模式: {item['name']}")
+    # 尝试实时上传
+    success = False
+    for attempt in range(1, UPLOAD_RETRIES + 1):
+        if upload_once(item, session):
+            print(f"[{get_log_time()}] [Upload] 实时上传成功: {item['name']}")
+            success = True
+            break
+        else:
+            if attempt < UPLOAD_RETRIES:
+                time.sleep(RETRY_DELAY)
+
+    if not success:
+        print(f"[{get_log_time()}] [Upload] 实时上传失败，进入降级模式: {item['name']}")
+        disk_manager.save(item)
+        with degraded_lock:
+            degraded_mode = True
+    
     photo_queue.task_done()
 
-def upload_task():
+def upload_task_loop():
     with ThreadPoolExecutor(max_workers=UPLOAD_WORKERS) as ex:
         while True:
             item = photo_queue.get()
             ex.submit(upload_worker, item)
 
+def flush_trigger_loop():
+    """
+    独立线程：定期检查内存标志位。如果标志位显示有文件，尝试触发补传。
+    """
+    session = requests.Session()
+    while True:
+        # 使用内存变量检测，替代频繁的 os.listdir
+        if disk_manager.has_files:
+            disk_manager.flush_to_server(session)
+        time.sleep(10)
+
 def camera_task():
     pic2 = Picamera2()
-
     res_map = {
-        "MAX": (4608, 2592),
-        "QSXGA": (2560, 1920),
-        "FHD": (1920, 1080),
-        "UXGA": (1600, 1200),
-        "VGA": (640, 480)
+        "MAX": (4608, 2592), "QSXGA": (2560, 1920), "FHD": (1920, 1080),
+        "UXGA": (1600, 1200), "VGA": (640, 480)
     }
 
     active_res = None
@@ -270,19 +296,14 @@ def camera_task():
     while True:
         try:
             loop_start = time.perf_counter()
-            target_wait = max(
-                config_data["interval"],
-                current_exposure * MANUAL_WAIT_MULTIPLIER
-            ) if mode == "MANUAL" else config_data["interval"]
+            target_wait = max(config_data["interval"], current_exposure * MANUAL_WAIT_MULTIPLIER) if mode == "MANUAL" else config_data["interval"]
             elapsed = time.perf_counter() - loop_start
             time.sleep(max(0.1, target_wait - elapsed))
 
             target_res = res_map.get(config_data["resolution"], res_map["MAX"])
             if active_res != target_res:
-                try:
-                    pic2.stop()
-                except:
-                    pass
+                try: pic2.stop()
+                except: pass
                 cfg = pic2.create_still_configuration(main={"size": target_res})
                 pic2.configure(cfg)
                 pic2.start()
@@ -299,30 +320,26 @@ def camera_task():
                 pic2.set_controls({
                     "AeEnable": False,
                     "ExposureTime": int(current_exposure * 1_000_000),
-                    "AnalogueGain": 16.0,
-                    "AfMode": 0
+                    "AnalogueGain": 16.0, "AfMode": 0
                 })
 
             buf = BytesIO()
             pic2.capture_file(buf, format="jpeg")
-            img_data = buf.getvalue()
-            img_data = rotate_image_if_needed(img_data)
+            img_data = rotate_image_if_needed(buf.getvalue())
 
             brightness = get_brightness(BytesIO(img_data))
-            print(f"[{get_log_time()}] [Cam] 模式:{mode} | 亮度:{brightness:.1f} | 曝光:{current_exposure if mode=='MANUAL' else 'AUTO'}s")
-
+            
+            # 曝光调节逻辑
             if mode == "AUTO":
                 photo_count_since_af += 1
                 if photo_count_since_af >= config_data["af_every_n"]:
                     pic2.autofocus_cycle()
                     photo_count_since_af = 0
                 if brightness < BRIGHTNESS_LOW_THRESHOLD:
-                    print(f"[{get_log_time()}] [Cam] >>> 亮度过低，切换至手动模式")
                     mode = "MANUAL"
                     current_exposure = MIN_EXPOSURE
             else:
                 if brightness > BRIGHTNESS_HIGH_THRESHOLD and current_exposure <= MIN_EXPOSURE:
-                    print(f"[{get_log_time()}] [Cam] >>> 最小曝光仍然过亮，切换回自动模式")
                     mode = "AUTO"
                     current_exposure = MIN_EXPOSURE
                     pic2.autofocus_cycle()
@@ -334,57 +351,58 @@ def camera_task():
                         delta = desired_exposure - current_exposure
                         if delta > 0:
                             max_step = current_exposure * STEP_SPEED_UP
-                            if delta > max_step:
-                                delta = max_step
+                            if delta > max_step: delta = max_step
                         else:
                             max_step = current_exposure * STEP_SPEED_DOWN
-                            if delta < -max_step:
-                                delta = -max_step
-                        current_exposure = current_exposure + delta
-                        if current_exposure < MIN_EXPOSURE:
-                            current_exposure = MIN_EXPOSURE
-                        elif current_exposure > MAX_EXPOSURE:
-                            current_exposure = MAX_EXPOSURE
-                        print(f"[{get_log_time()}] [Cam] 调整曝光至: {current_exposure:.3f}s")
-                    else:
-                        print(f"[{get_log_time()}] [Cam] 亮度进入死区，保持曝光")
+                            if delta < -max_step: delta = -max_step
+                        current_exposure = max(MIN_EXPOSURE, min(MAX_EXPOSURE, current_exposure + delta))
 
             filename = f"pic_{DEVICE_ID}_{timestamp}.jpg"
             try:
                 photo_queue.put_nowait({"name": filename, "data": img_data})
             except Full:
-                pass
+                print(f"[{get_log_time()}] [Cam] 队列满，丢弃当前帧")
 
         except Exception as e:
-            print(f"[{get_log_time()}] [Cam] 错误: {e}")
+            print(f"[{get_log_time()}] [Cam] 运行异常: {e}")
             time.sleep(2)
 
 if __name__ == "__main__":
-    print(f"[{get_log_time()}] === Zero 2W 延时摄影启动 ===")
+    print(f"[{get_log_time()}] === Zero 2W 延时摄影增强版启动 ===")
 
+    # 启动时默认进入降级模式，直到网络检查通过
     with degraded_lock:
         degraded_mode = True
 
-    session = requests.Session()
+    def startup_logic():
+        session = requests.Session()
+        start_time = time.time()
+        
+        # 1. 等待网络就绪
+        while time.time() - start_time < STARTUP_NETWORK_WAIT_MAX:
+            try:
+                r = session.get(f"{SERVER_URL}/", timeout=5)
+                if r.status_code < 500:
+                    print(f"[{get_log_time()}] [Init] 网络连通性测试通过")
+                    break
+            except: pass
+            print(f"[{get_log_time()}] [Init] 等待网络中...")
+            time.sleep(NETWORK_CHECK_INTERVAL)
+        
+        # 2. 强制执行一次磁盘补传检测（使用内存变量标记位触发）
+        if disk_manager.has_files:
+            disk_manager.flush_to_server(session)
+        
+        print(f"[{get_log_time()}] [Init] 启动流程结束，进入常规模式")
 
-    # 异步补传残留文件
-    def flush_disk_background():
-        success = disk_manager.flush_if_needed(lambda i: upload_once(i, session))
-        with degraded_lock:
-            global degraded_mode
-            degraded_mode = False
-        if success:
-            print(f"[{get_log_time()}] [Init] 磁盘残留上传尝试完成，恢复正常模式")
-        else:
-            print(f"[{get_log_time()}] [Init] 磁盘残留部分文件未上传，仍处于降级模式")
-
-    threading.Thread(target=flush_disk_background, daemon=True).start()
-
+    # 启动所有后台线程
+    threading.Thread(target=startup_logic, daemon=True).start()
     threading.Thread(target=camera_task, daemon=True).start()
-    threading.Thread(target=upload_task, daemon=True).start()
+    threading.Thread(target=upload_task_loop, daemon=True).start()
+    threading.Thread(target=flush_trigger_loop, daemon=True).start()
 
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print(f"\n[{get_log_time()}] 停止")
+        print(f"\n[{get_log_time()}] 用户停止")
